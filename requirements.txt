@@ -1,0 +1,9 @@
+# requirements.txt
+onnxruntime
+silero
+pydub
+tqdm
+pandas
+numpy<2.0
+PyYAML
+requests
