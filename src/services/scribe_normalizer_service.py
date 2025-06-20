@@ -50,5 +50,8 @@ class ScribeNormalizerService:
         # Join all text parts with a space
         master_transcript['text'] = " ".join(full_text_parts)
 
+        # Add a unique ID to each word object for consistency with the reference project.
+        for i, word in enumerate(master_transcript['words']):
+            word['id'] = i
+
         return master_transcript
-    

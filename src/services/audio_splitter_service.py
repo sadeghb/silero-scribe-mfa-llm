@@ -2,31 +2,35 @@
 from pathlib import Path
 import pandas as pd
 from pydub import AudioSegment
-from typing import List
+import logging
 
 class AudioSplitterService:
-    """A service to split an audio file into chunks based on timestamps."""
+    """
+    A service to split an audio file into chunks based on a DataFrame
+    of start and end times.
+    """
     def __init__(self):
-        print("AudioSplitterService initialized.")
+        logging.info("AudioSplitterService initialized.")
 
-    # Modified to accept the pydub AudioSegment object directly
-    def run(self, audio_segment: AudioSegment, chunk_df: pd.DataFrame, chunks_dir: Path, original_stem: str) -> List[Path]:
+    def run(self, audio: AudioSegment, transcription_chunks_df: pd.DataFrame, chunks_dir: Path, audio_name: str) -> list[Path]:
         """
-        Splits the audio and saves the chunks to a directory.
+        Splits the main audio into smaller chunks for transcription.
         """
-        print(f"Splitting audio...")
-        chunks_dir.mkdir(exist_ok=True, parents=True)
         chunk_paths = []
-
-        for i, row in chunk_df.iterrows():
-            start_ms = row['chunk_start_ms']
-            end_ms = row['chunk_end_ms']
-            chunk = audio_segment[start_ms:end_ms]
+        for i, row in transcription_chunks_df.iterrows():
+            start_ms = row['start_ms']
+            end_ms = row['end_ms']
             
-            chunk_path = chunks_dir / f"{original_stem}_chunk_{i+1}.wav"
-            chunk.export(chunk_path, format="wav")
+            chunk_path = chunks_dir / f"{audio_name}_scribe_chunk_{i + 1}.wav"
+            
+            self.split_and_save_chunk(audio, start_ms, end_ms, chunk_path)
             chunk_paths.append(chunk_path)
-        
-        print(f"Successfully created {len(chunk_paths)} audio chunks.")
+            
         return chunk_paths
-    
+
+    def split_and_save_chunk(self, audio: AudioSegment, start_ms: float, end_ms: float, output_path: Path):
+        """
+        Extracts a single audio chunk from the main audio and saves it to a file.
+        """
+        chunk = audio[start_ms:end_ms]
+        chunk.export(output_path, format="wav")
