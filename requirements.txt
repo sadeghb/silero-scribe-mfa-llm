@@ -1,4 +1,5 @@
 # requirements.txt
+
 onnxruntime
 silero
 pydub
@@ -7,3 +8,5 @@ pandas
 numpy<2.0
 PyYAML
 requests
+librosa
+textgrid
