@@ -6,6 +6,7 @@ from pydub import AudioSegment
 import numpy as np
 import librosa
 import pandas as pd
+import random
 
 class AudioEditorService:
     """
@@ -14,8 +15,13 @@ class AudioEditorService:
     def __init__(self, config: Dict[str, Any]):
         logging.info("AudioEditorService initialized.")
         self.config = config.get('editing', {})
-        self.backward_invasion = self.config.get('backward_phoneme_invasion_factor', 0.8)
-        self.forward_invasion = self.config.get('forward_phoneme_invasion_factor', 0.8)
+        # self.backward_invasion = self.config.get('backward_phoneme_invasion_factor', 0.8)
+        # self.forward_invasion = self.config.get('forward_phoneme_invasion_factor', 0.8)
+        # --- MODIFICATION 2: Read the invasion interval from the config ---
+        # Reads the interval, e.g., [0.7, 0.9]. Defaults to a fixed [0.7, 0.9] if not found.
+        self.backward_invasion_interval = self.config.get('backward_phoneme_invasion_interval', [0.7, 0.9])
+        self.forward_invasion_interval = self.config.get('forward_phoneme_invasion_interval', [0.7, 0.9])
+        # --- END MODIFICATION ---        
 
     def _find_outward_zero_crossing(self, signal: np.ndarray, sample_index: int, direction: str) -> int:
         """Finds the nearest 'outward' zero-crossing from a given sample index."""
@@ -162,12 +168,18 @@ class AudioEditorService:
         nat_start, nat_end = self._get_cut_boundaries(cut_word_ids, word_id_map, mfa_data, 0.0, 0.0)
         nat_start = self._find_outward_zero_crossing(y_full, int(nat_start * sr), 'backward') / sr
         nat_end = self._find_outward_zero_crossing(y_full, int(nat_end * sr), 'forward') / sr
-        
-        bwd_start, bwd_end = self._get_cut_boundaries(cut_word_ids, word_id_map, mfa_data, self.backward_invasion, 0.0)
+
+        # --- MODIFICATION: Select a random factor for each unnatural cut ---
+        random_bwd_factor = random.uniform(self.backward_invasion_interval[0], self.backward_invasion_interval[1])
+        bwd_start, bwd_end = self._get_cut_boundaries(cut_word_ids, word_id_map, mfa_data, random_bwd_factor, 0.0)
+        # --- END MODIFICATION ---
         bwd_start = self._find_outward_zero_crossing(y_full, int(bwd_start * sr), 'backward') / sr
         bwd_end = self._find_outward_zero_crossing(y_full, int(bwd_end * sr), 'forward') / sr
 
-        fwd_start, fwd_end = self._get_cut_boundaries(cut_word_ids, word_id_map, mfa_data, 0.0, self.forward_invasion)
+        # --- MODIFICATION: Select a random factor for each unnatural cut ---
+        random_fwd_factor = random.uniform(self.forward_invasion_interval[0], self.forward_invasion_interval[1])
+        fwd_start, fwd_end = self._get_cut_boundaries(cut_word_ids, word_id_map, mfa_data, 0.0, random_fwd_factor)
+        # --- END MODIFICATION ---
         fwd_start = self._find_outward_zero_crossing(y_full, int(fwd_start * sr), 'backward') / sr
         fwd_end = self._find_outward_zero_crossing(y_full, int(fwd_end * sr), 'forward') / sr
 
@@ -175,6 +187,21 @@ class AudioEditorService:
         backward_invasion_chunk = self._perform_direct_cut(original_chunk, bwd_start - chunk_start_s, bwd_end - chunk_start_s)
         forward_invasion_chunk = self._perform_direct_cut(original_chunk, fwd_start - chunk_start_s, fwd_end - chunk_start_s)
 
+        # return {
+        #     "original_audio": original_chunk,
+        #     "natural_cut_audio": natural_cut_chunk,
+        #     "backward_invasion_audio": backward_invasion_chunk,
+        #     "forward_invasion_audio": forward_invasion_chunk,
+        #     "metadata": {
+        #         "chunk_start_s_abs": chunk_start_s,
+        #         "chunk_end_s_abs": chunk_end_s,
+        #         "natural_cut_timestamps_relative": (nat_start - chunk_start_s, nat_end - chunk_start_s),
+        #         "backward_invasion_timestamps_relative": (bwd_start - chunk_start_s, bwd_end - chunk_start_s),
+        #         "forward_invasion_timestamps_relative": (fwd_start - chunk_start_s, fwd_end - chunk_start_s)
+        #     }
+        # }
+
+        # --- MODIFICATION START: Add the random factors to the returned metadata ---
         return {
             "original_audio": original_chunk,
             "natural_cut_audio": natural_cut_chunk,
@@ -185,7 +212,9 @@ class AudioEditorService:
                 "chunk_end_s_abs": chunk_end_s,
                 "natural_cut_timestamps_relative": (nat_start - chunk_start_s, nat_end - chunk_start_s),
                 "backward_invasion_timestamps_relative": (bwd_start - chunk_start_s, bwd_end - chunk_start_s),
-                "forward_invasion_timestamps_relative": (fwd_start - chunk_start_s, fwd_end - chunk_start_s)
+                "forward_invasion_timestamps_relative": (fwd_start - chunk_start_s, fwd_end - chunk_start_s),
+                "backward_invasion_factor_used": random_bwd_factor,
+                "forward_invasion_factor_used": random_fwd_factor
             }
         }
-    
+        # --- MODIFICATION END ---
