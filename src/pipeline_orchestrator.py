@@ -6,10 +6,13 @@ from pydub import AudioSegment
 from typing import Dict, Any
 import shutil
 import logging
+import librosa
+import numpy as np
 
 from src.utils.mfa_text_normalizer import normalize_text_for_mfa
 
 class PipelineOrchestrator:
+    # __init__ and _get_cache_path are unchanged...
     def __init__(self, services: Dict, config: Dict[str, Any]):
         logging.info("PipelineOrchestrator initialized.")
         self.services = services
@@ -52,6 +55,7 @@ class PipelineOrchestrator:
 
 
     def run(self, audio_path: Path):
+        # --- Stages 1-5 (Unchanged) ---
         logging.info(f"\n--- Starting pipeline for: {audio_path.name} ---")
         audio = AudioSegment.from_file(audio_path)
         total_duration_s = len(audio) / 1000.0
@@ -79,29 +83,16 @@ class PipelineOrchestrator:
         logging.info("Executing Scribe Transcription stage...")
         final_transcript_cache_path = self._get_cache_path('scribe', audio_path)
         if self.use_cache and final_transcript_cache_path.exists():
-            logging.info(f"✅ Final scribe transcript found in cache. Loading from {final_transcript_cache_path}")
             with open(final_transcript_cache_path, 'r') as f:
                 final_transcript = json.load(f)
         else:
-            logging.info("No final scribe transcript cache found. Running full transcription pipeline...")
-            
             transcription_chunks_df = self.services['transcription_chunker'].run(split_points_df)
-            logging.info("Transcription Chunker stage complete.")
-            
-            splitter_df = transcription_chunks_df.rename(
-                columns={'chunk_start_ms': 'start_ms', 'chunk_end_ms': 'end_ms'}
-            )
-            
+            splitter_df = transcription_chunks_df.rename(columns={'chunk_start_ms': 'start_ms', 'chunk_end_ms': 'end_ms'})
             chunks_dir = self.cache_root.parent / self.config['cache_paths']['audio_chunks']
-            # --- MODIFICATION START: Create the audio_chunks directory before use ---
             chunks_dir.mkdir(exist_ok=True, parents=True)
-            # --- MODIFICATION END ---
             chunk_paths = self.services['audio_splitter'].run(audio, splitter_df, chunks_dir, audio_path.stem)
-            logging.info("Audio Splitter stage complete.")
-
             raw_scribe_results = []
             scribe_cache_dir = self.cache_root.parent / self.config['cache_paths']['scribe']
-            scribe_cache_dir.mkdir(exist_ok=True, parents=True)
             for i, chunk_path in enumerate(chunk_paths):
                 scribe_chunk_cache_file = scribe_cache_dir / f"{chunk_path.stem}_scribe_chunk.json"
                 if self.use_cache and scribe_chunk_cache_file.exists():
@@ -111,87 +102,123 @@ class PipelineOrchestrator:
                     if self.use_cache:
                         with open(scribe_chunk_cache_file, 'w') as f: json.dump(result, f, indent=2)
                 raw_scribe_results.append(result)
-            
-            logging.info("Individual chunk transcription complete.")
-            
             final_transcript = self.services['scribe_normalizer'].run(raw_scribe_results, transcription_chunks_df)
-            logging.info("Normalization stage complete.")
-
             if self.use_cache:
-                with open(final_transcript_cache_path, 'w') as f:
-                    json.dump(final_transcript, f, indent=2)
-                logging.info(f"✅ Final normalized transcript saved to cache: {final_transcript_cache_path}")
-        
+                with open(final_transcript_cache_path, 'w') as f: json.dump(final_transcript, f, indent=2)
         logging.info("Scribe Transcription stage complete.")
 
         logging.info("Executing MFA Alignment stage...")
         mfa_cache_path = self._get_cache_path('mfa', audio_path)
-
         if self.use_cache and mfa_cache_path.exists():
-            logging.info(f"✅ Final MFA alignment found in cache. Loading from: {mfa_cache_path}")
             with open(mfa_cache_path, 'r') as f:
                 final_mfa_data = json.load(f)
         else:
-            logging.info("No final MFA cache found. Running full MFA pipeline...")
-            
             mfa_chunker_svc = self.services['mfa_chunker']
             mfa_chunks = mfa_chunker_svc.run(split_points_df, final_transcript, total_duration_s=total_duration_s)
-
             mfa_temp_dir = self.cache_root / "mfa_temp"
-            if mfa_temp_dir.exists():
-                shutil.rmtree(mfa_temp_dir)
+            if mfa_temp_dir.exists(): shutil.rmtree(mfa_temp_dir)
             mfa_temp_dir.mkdir()
-            
             audio_splitter_svc = self.services['audio_splitter']
             for chunk in mfa_chunks:
                 lab_path = mfa_temp_dir / f"mfa_chunk_{chunk['id']}.lab"
                 normalized_text = normalize_text_for_mfa(chunk['transcript'])
-                with open(lab_path, 'w') as f:
-                    f.write(normalized_text)
-                
-                audio_splitter_svc.split_and_save_chunk(
-                    audio, 
-                    chunk['start_s'] * 1000, 
-                    chunk['end_s'] * 1000, 
-                    mfa_temp_dir / f"mfa_chunk_{chunk['id']}.wav"
-                )
-            logging.info(f"Prepared {len(mfa_chunks)} .lab and .wav files for MFA.")
-
+                with open(lab_path, 'w') as f: f.write(normalized_text)
+                audio_splitter_svc.split_and_save_chunk(audio, chunk['start_s'] * 1000, chunk['end_s'] * 1000, mfa_temp_dir / f"mfa_chunk_{chunk['id']}.wav")
             mfa_aligner_svc = self.services['mfa_aligner']
             mfa_output_dir = mfa_aligner_svc.run(mfa_temp_dir, mfa_temp_dir)
-            
             mfa_normalizer_svc = self.services['mfa_normalizer']
             final_mfa_data = mfa_normalizer_svc.run(mfa_output_dir, mfa_chunks)
-
             if self.use_cache:
-                with open(mfa_cache_path, 'w') as f:
-                    json.dump(final_mfa_data, f, indent=4)
-                logging.info(f"✅ Final MFA aligned data saved to cache: {mfa_cache_path}")
-            
+                with open(mfa_cache_path, 'w') as f: json.dump(final_mfa_data, f, indent=4)
             shutil.rmtree(mfa_temp_dir)
-            logging.info("Cleaned up temporary MFA files.")
-
         logging.info("MFA Alignment stage complete.")
         
         logging.info("Executing LLM Cut Selection stage...")
         llm_cache_path = self._get_cache_path('llm', audio_path)
-        
         if self.use_cache and llm_cache_path.exists():
-            logging.info(f"✅ LLM result found in cache. Loading from: {llm_cache_path}")
             with open(llm_cache_path, 'r') as f:
                 marked_transcript = f.read()
         else:
-            logging.info("No LLM cache found. Running LLMCutSelectorService...")
             llm_service = self.services['llm_cut_selector']
             transcript_text = final_transcript.get('text', '')
             marked_transcript = llm_service.run(transcript_text)
-            
             if self.use_cache:
-                with open(llm_cache_path, 'w') as f:
-                    f.write(marked_transcript)
-                logging.info(f"✅ LLM marked transcript saved to cache: {llm_cache_path}")
-        
+                with open(llm_cache_path, 'w') as f: f.write(marked_transcript)
         logging.info("LLM Cut Selection stage complete.")
         
-        return final_mfa_data, marked_transcript
-    
+        # --- Stage 6: Cut Parsing, Editing, and Dataset Generation ---
+        logging.info("Executing Final Editing and Dataset Generation stage...")
+
+        y_full, sr = librosa.load(str(audio_path), sr=None, mono=True)
+
+        cut_parser_svc = self.services['cut_parser']
+        audio_editor_svc = self.services['audio_editor']
+        dataset_generator_svc = self.services['dataset_generator']
+
+        # cut_segments = cut_parser_svc.run(final_mfa_data, marked_transcript)
+        # --- MODIFICATION START: Using Scribe data for parsing ---
+        cut_segments = cut_parser_svc.run(final_transcript['words'], marked_transcript)
+        # --- MODIFICATION END ---
+
+        if not cut_segments:
+            logging.info("No cut segments identified by the parser. Skipping editing.")
+            return
+
+        for i, cut_word_ids in enumerate(cut_segments):
+            # --- MODIFICATION START: Skip cuts at the beginning or end of the audio ---
+            last_word_id_in_transcript = len(final_mfa_data) - 1
+            if not cut_word_ids or cut_word_ids[0] == 0 or cut_word_ids[-1] == last_word_id_in_transcript:
+                logging.warning(f"Skipping cut segment {cut_word_ids} because it involves a boundary word.")
+                continue
+            # --- MODIFICATION END ---
+            logging.info(f"Processing cut {i+1}/{len(cut_segments)} (word IDs: {cut_word_ids})...")
+            
+            edit_results = audio_editor_svc.run(
+                cut_word_ids=cut_word_ids,
+                full_audio=audio,
+                y_full=y_full,
+                sr=sr,
+                mfa_data=final_mfa_data,
+                scribe_data=final_transcript,
+                split_points_df=split_points_df
+            )
+            
+            # --- MODIFICATION START: Filter words for the current chunk ---
+            chunk_start_s = edit_results["metadata"]["chunk_start_s_abs"]
+            chunk_end_s = edit_results["metadata"]["chunk_end_s_abs"]
+
+            # --- MODIFICATION START: Implement "majority overlap" rule ---
+            chunk_words = []
+            for word in final_transcript['words']:
+                word_start = word.get('start', 0)
+                word_end = word.get('end', 0)
+                word_duration = word_end - word_start
+                if word_duration <= 0:
+                    continue
+
+                overlap_start = max(word_start, chunk_start_s)
+                overlap_end = min(word_end, chunk_end_s)
+                
+                # Ensure overlap is positive
+                overlap_duration = max(0, overlap_end - overlap_start)
+
+                if overlap_duration > (0.5 * word_duration):
+                    chunk_words.append(word)
+            # --- MODIFICATION END ---
+
+            # chunk_words = [
+            #     word for word in final_mfa_data 
+            #     if word['start'] >= chunk_start_s and word['end'] <= chunk_end_s
+            # ]
+            # --- MODIFICATION END ---
+            
+            dataset_generator_svc.run(
+                source_audio_name=audio_path.stem,
+                cut_id=i + 1,
+                cut_word_ids=cut_word_ids,
+                chunk_words=chunk_words, # Pass the filtered list of words
+                edit_results=edit_results
+            )
+        
+        logging.info("Final Editing and Dataset Generation stage complete.")
+        

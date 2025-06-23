@@ -40,6 +40,11 @@ class ScribeNormalizerService:
             for item in result.get('words', []):
                 # Create a copy to avoid modifying the original dict
                 normalized_item = item.copy()
+
+                # --- MODIFICATION START: Reclassify '...' as an 'artifact' ---
+                if normalized_item.get('text') == '...':
+                    normalized_item['type'] = 'artifact'
+                # --- MODIFICATION END ---
                 
                 # Adjust timestamps by adding the chunk's start offset
                 normalized_item['start'] = round(item['start'] + chunk_start_offset_s, 3)
