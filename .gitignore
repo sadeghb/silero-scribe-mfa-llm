@@ -162,6 +162,7 @@ audio_inputs/
 
 # Ignore all generated dataset files.
 output_dataset/
+output_for_eval/
 
 # Ignore all cached API and MFA results.
 cache/

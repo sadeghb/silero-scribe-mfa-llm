@@ -1,27 +1,20 @@
-# src/services/audio_editor_service.py
 import logging
-from pathlib import Path
 from typing import List, Dict, Any, Tuple
 from pydub import AudioSegment
 import numpy as np
-import librosa
-import pandas as pd
 import random
 
 class AudioEditorService:
     """
     Handles the logic for creating edited audio clips based on cut events.
+    This version includes the final tweaks for the is_usable flag and metadata text.
     """
     def __init__(self, config: Dict[str, Any]):
         logging.info("AudioEditorService initialized.")
         self.config = config.get('editing', {})
-        # self.backward_invasion = self.config.get('backward_phoneme_invasion_factor', 0.8)
-        # self.forward_invasion = self.config.get('forward_phoneme_invasion_factor', 0.8)
-        # --- MODIFICATION 2: Read the invasion interval from the config ---
-        # Reads the interval, e.g., [0.7, 0.9]. Defaults to a fixed [0.7, 0.9] if not found.
         self.backward_invasion_interval = self.config.get('backward_phoneme_invasion_interval', [0.7, 0.9])
         self.forward_invasion_interval = self.config.get('forward_phoneme_invasion_interval', [0.7, 0.9])
-        # --- END MODIFICATION ---        
+        self.context_duration_ms = self.config.get('context_duration_ms', 3000)
 
     def _find_outward_zero_crossing(self, signal: np.ndarray, sample_index: int, direction: str) -> int:
         """Finds the nearest 'outward' zero-crossing from a given sample index."""
@@ -90,131 +83,94 @@ class AudioEditorService:
                 
         return start_time, end_time
 
-    def _perform_direct_cut(self, audio: AudioSegment, start_s: float, end_s: float) -> AudioSegment:
-        start_ms = int(start_s * 1000)
-        end_ms = int(end_s * 1000)
-        if start_ms < 0 or end_ms > len(audio) or start_ms >= end_ms:
-            logging.error(f"Invalid cut timestamps provided: start={start_ms}ms, end={end_ms}ms on a clip of {len(audio)}ms. Returning original clip.")
-            return audio
-        return audio[:start_ms] + audio[end_ms:]
-        
-    def _is_scribe_spacing(self, time_s: float, scribe_data: Dict[str, Any]) -> bool:
-        for word in scribe_data.get('words', []):
-            if word['start'] <= time_s <= word['end']:
-                return word['type'] == 'spacing'
-        return False
-
     def run(self,
             cut_word_ids: List[int],
             full_audio: AudioSegment,
             y_full: np.ndarray,
             sr: int,
             mfa_data: List[Dict],
-            scribe_data: Dict,
-            split_points_df: pd.DataFrame
+            **kwargs # Absorb unused arguments
            ) -> Dict:
+        """
+        Generates three distinct audio clips and applies final logic for
+        the is_usable flag and metadata text.
+        """
         word_id_map = {word['id']: word for word in mfa_data}
 
         try:
             first_word_to_cut = word_id_map[cut_word_ids[0]]
             last_word_to_cut = word_id_map[cut_word_ids[-1]]
         except KeyError as e:
-            logging.error(f"FATAL: Word with ID {e} specified in a cut was not found in the MFA data. Skipping this cut.")
+            logging.error(f"FATAL: Word with ID {e} was not found in the MFA data. Skipping this cut.")
             return None
 
-        # --- MODIFICATION START: Final logic for chunking with context ---
-        # 1. Identify the context words
+        # --- Tweak #1: Modified is_usable flag logic ---
+        words_to_check_for_reliability = []
         first_word_index = next((i for i, item in enumerate(mfa_data) if item["id"] == cut_word_ids[0]), -1)
         last_word_index = next((i for i, item in enumerate(mfa_data) if item["id"] == cut_word_ids[-1]), -1)
 
-        context_word_before = mfa_data[first_word_index - 1] if first_word_index > 0 else None
-        context_word_after = mfa_data[last_word_index + 1] if last_word_index != -1 and last_word_index < len(mfa_data) - 1 else None
+        words_to_check_for_reliability.append(first_word_to_cut)
+        words_to_check_for_reliability.append(last_word_to_cut)
+
+        if first_word_index > 0:
+            words_to_check_for_reliability.append(mfa_data[first_word_index - 1])
+        if last_word_index != -1 and last_word_index < len(mfa_data) - 1:
+            words_to_check_for_reliability.append(mfa_data[last_word_index + 1])
         
-        # 2. Define the time range that must be included in the chunk
-        context_start_time = context_word_before['start'] if context_word_before else first_word_to_cut['start']
-        context_end_time = context_word_after['end'] if context_word_after else last_word_to_cut['end']
+        is_usable = all(w.get('is_reliable_timestamp', True) for w in words_to_check_for_reliability)
 
-        total_duration_s = len(full_audio) / 1000.0
-        eligible_points_s = (split_points_df['split_point_ms'] / 1000.0).tolist()
-
-        # --- MODIFICATION START: Remove Scribe 'spacing' check ---
-        # Find the nearest eligible point before the context start time.
-        start_candidates = [p for p in eligible_points_s if p <= context_start_time]
-        chunk_start_s = max(start_candidates) if start_candidates else 0.0
-
-        # Find the nearest eligible point after the context end time.
-        end_candidates = [p for p in eligible_points_s if p >= context_end_time]
-        chunk_end_s = min(end_candidates) if end_candidates else total_duration_s
-        # --- MODIFICATION END ---
-
-        # # 3. Find the nearest valid silent point that *contains* the required context
-        # chunk_start_s = 0.0
-        # start_candidates = sorted([p for p in eligible_points_s if p <= context_start_time], reverse=True)
-        # for p in start_candidates:
-        #     if self._is_scribe_spacing(p, scribe_data):
-        #         chunk_start_s = p
-        #         break
+        # --- 1. Natural Cut ---
+        nat_start_s, nat_end_s = self._get_cut_boundaries(cut_word_ids, word_id_map, mfa_data, 0.0, 0.0)
+        nat_splice_before_s = self._find_outward_zero_crossing(y_full, int(nat_start_s * sr), 'backward') / sr
+        nat_splice_after_s = self._find_outward_zero_crossing(y_full, int(nat_end_s * sr), 'forward') / sr
         
-        # chunk_end_s = total_duration_s
-        # end_candidates = sorted([p for p in eligible_points_s if p >= context_end_time])
-        # for p in end_candidates:
-        #     if self._is_scribe_spacing(p, scribe_data):
-        #         chunk_end_s = p
-        #         break
-        # --- MODIFICATION END ---
+        nat_before_start_ms = max(0, int(nat_splice_before_s * 1000) - self.context_duration_ms)
+        nat_before_segment = full_audio[nat_before_start_ms : int(nat_splice_before_s * 1000)]
         
-        original_chunk = full_audio[int(chunk_start_s * 1000):int(chunk_end_s * 1000)]
+        nat_after_end_ms = min(len(full_audio), int(nat_splice_after_s * 1000) + self.context_duration_ms)
+        nat_after_segment = full_audio[int(nat_splice_after_s * 1000) : nat_after_end_ms]
+        
+        natural_cut_audio = nat_before_segment + nat_after_segment
 
-        nat_start, nat_end = self._get_cut_boundaries(cut_word_ids, word_id_map, mfa_data, 0.0, 0.0)
-        nat_start = self._find_outward_zero_crossing(y_full, int(nat_start * sr), 'backward') / sr
-        nat_end = self._find_outward_zero_crossing(y_full, int(nat_end * sr), 'forward') / sr
-
-        # --- MODIFICATION: Select a random factor for each unnatural cut ---
+        # --- 2. Unnatural Backward Invasion Cut ---
         random_bwd_factor = random.uniform(self.backward_invasion_interval[0], self.backward_invasion_interval[1])
-        bwd_start, bwd_end = self._get_cut_boundaries(cut_word_ids, word_id_map, mfa_data, random_bwd_factor, 0.0)
-        # --- END MODIFICATION ---
-        bwd_start = self._find_outward_zero_crossing(y_full, int(bwd_start * sr), 'backward') / sr
-        bwd_end = self._find_outward_zero_crossing(y_full, int(bwd_end * sr), 'forward') / sr
+        bwd_start_s, bwd_end_s = self._get_cut_boundaries(cut_word_ids, word_id_map, mfa_data, random_bwd_factor, 0.0)
+        bwd_splice_before_s = self._find_outward_zero_crossing(y_full, int(bwd_start_s * sr), 'backward') / sr
+        bwd_splice_after_s = self._find_outward_zero_crossing(y_full, int(bwd_end_s * sr), 'forward') / sr
+        
+        bwd_before_start_ms = max(0, int(bwd_splice_before_s * 1000) - self.context_duration_ms)
+        bwd_before_segment = full_audio[bwd_before_start_ms : int(bwd_splice_before_s * 1000)]
+        
+        bwd_after_end_ms = min(len(full_audio), int(bwd_splice_after_s * 1000) + self.context_duration_ms)
+        bwd_after_segment = full_audio[int(bwd_splice_after_s * 1000) : bwd_after_end_ms]
+        
+        unnatural_backward_audio = bwd_before_segment + bwd_after_segment
 
-        # --- MODIFICATION: Select a random factor for each unnatural cut ---
+        # --- 3. Unnatural Forward Invasion Cut ---
         random_fwd_factor = random.uniform(self.forward_invasion_interval[0], self.forward_invasion_interval[1])
-        fwd_start, fwd_end = self._get_cut_boundaries(cut_word_ids, word_id_map, mfa_data, 0.0, random_fwd_factor)
-        # --- END MODIFICATION ---
-        fwd_start = self._find_outward_zero_crossing(y_full, int(fwd_start * sr), 'backward') / sr
-        fwd_end = self._find_outward_zero_crossing(y_full, int(fwd_end * sr), 'forward') / sr
+        fwd_start_s, fwd_end_s = self._get_cut_boundaries(cut_word_ids, word_id_map, mfa_data, 0.0, random_fwd_factor)
+        fwd_splice_before_s = self._find_outward_zero_crossing(y_full, int(fwd_start_s * sr), 'backward') / sr
+        fwd_splice_after_s = self._find_outward_zero_crossing(y_full, int(fwd_end_s * sr), 'forward') / sr
 
-        natural_cut_chunk = self._perform_direct_cut(original_chunk, nat_start - chunk_start_s, nat_end - chunk_start_s)
-        backward_invasion_chunk = self._perform_direct_cut(original_chunk, bwd_start - chunk_start_s, bwd_end - chunk_start_s)
-        forward_invasion_chunk = self._perform_direct_cut(original_chunk, fwd_start - chunk_start_s, fwd_end - chunk_start_s)
+        fwd_before_start_ms = max(0, int(fwd_splice_before_s * 1000) - self.context_duration_ms)
+        fwd_before_segment = full_audio[fwd_before_start_ms : int(fwd_splice_before_s * 1000)]
+        
+        fwd_after_end_ms = min(len(full_audio), int(fwd_splice_after_s * 1000) + self.context_duration_ms)
+        fwd_after_segment = full_audio[int(fwd_splice_after_s * 1000) : fwd_after_end_ms]
+        
+        unnatural_forward_audio = fwd_before_segment + fwd_after_segment
 
-        # return {
-        #     "original_audio": original_chunk,
-        #     "natural_cut_audio": natural_cut_chunk,
-        #     "backward_invasion_audio": backward_invasion_chunk,
-        #     "forward_invasion_audio": forward_invasion_chunk,
-        #     "metadata": {
-        #         "chunk_start_s_abs": chunk_start_s,
-        #         "chunk_end_s_abs": chunk_end_s,
-        #         "natural_cut_timestamps_relative": (nat_start - chunk_start_s, nat_end - chunk_start_s),
-        #         "backward_invasion_timestamps_relative": (bwd_start - chunk_start_s, bwd_end - chunk_start_s),
-        #         "forward_invasion_timestamps_relative": (fwd_start - chunk_start_s, fwd_end - chunk_start_s)
-        #     }
-        # }
+        # --- Tweak #2: Prepare cut_text for metadata ---
+        cut_words_list = [word_id_map[wid] for wid in cut_word_ids]
+        cut_text = " ".join([w.get('word', '') for w in cut_words_list])
 
-        # --- MODIFICATION START: Add the random factors to the returned metadata ---
         return {
-            "original_audio": original_chunk,
-            "natural_cut_audio": natural_cut_chunk,
-            "backward_invasion_audio": backward_invasion_chunk,
-            "forward_invasion_audio": forward_invasion_chunk,
-            "metadata": {
-                "chunk_start_s_abs": chunk_start_s,
-                "chunk_end_s_abs": chunk_end_s,
-                "natural_cut_timestamps_relative": (nat_start - chunk_start_s, nat_end - chunk_start_s),
-                "backward_invasion_timestamps_relative": (bwd_start - chunk_start_s, bwd_end - chunk_start_s),
-                "forward_invasion_timestamps_relative": (fwd_start - chunk_start_s, fwd_end - chunk_start_s),
-                "backward_invasion_factor_used": random_bwd_factor,
-                "forward_invasion_factor_used": random_fwd_factor
-            }
+            "audios": {
+                "natural_cut": natural_cut_audio,
+                "unnatural_backward": unnatural_backward_audio,
+                "unnatural_forward": unnatural_forward_audio,
+            },
+            "is_usable": is_usable,
+            "cut_text": cut_text
         }
-        # --- MODIFICATION END ---
+    

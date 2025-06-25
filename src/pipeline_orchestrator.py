@@ -1,4 +1,3 @@
-# src/pipeline_orchestrator.py
 from pathlib import Path
 import pandas as pd
 import json
@@ -55,7 +54,7 @@ class PipelineOrchestrator:
 
 
     def run(self, audio_path: Path):
-        # --- Stages 1-5 (Unchanged) ---
+        # --- Stages 1-5 (Unchanged from your original file) ---
         logging.info(f"\n--- Starting pipeline for: {audio_path.name} ---")
         audio = AudioSegment.from_file(audio_path)
         total_duration_s = len(audio) / 1000.0
@@ -147,6 +146,8 @@ class PipelineOrchestrator:
                 with open(llm_cache_path, 'w') as f: f.write(marked_transcript)
         logging.info("LLM Cut Selection stage complete.")
         
+        # --- START OF MODIFIED SECTION ---
+        
         logging.info("Executing Final Editing and Dataset Generation stage...")
 
         y_full, sr = librosa.load(str(audio_path), sr=None, mono=True)
@@ -162,6 +163,7 @@ class PipelineOrchestrator:
             return
 
         for i, cut_word_ids in enumerate(cut_segments):
+            # This boundary check remains the same
             last_word_id_in_transcript = len(final_mfa_data) - 1
             if not cut_word_ids or cut_word_ids[0] == 0 or cut_word_ids[-1] == last_word_id_in_transcript:
                 logging.warning(f"Skipping cut segment {cut_word_ids} because it involves a boundary word.")
@@ -169,48 +171,33 @@ class PipelineOrchestrator:
 
             logging.info(f"Processing cut {i+1}/{len(cut_segments)} (word IDs: {cut_word_ids})...")
             
+            # THE FIX: This is the only part that changes.
+            # 1. Call the modified audio_editor_svc. It now returns the composed audios and all necessary metadata.
             edit_results = audio_editor_svc.run(
                 cut_word_ids=cut_word_ids,
                 full_audio=audio,
                 y_full=y_full,
                 sr=sr,
                 mfa_data=final_mfa_data,
-                scribe_data=final_transcript,
-                split_points_df=split_points_df
+                scribe_data=final_transcript, # Kept for signature consistency, though may not be used
+                split_points_df=split_points_df # Kept for signature consistency
             )
             
+            # 2. Check if the editor service produced a result.
             if edit_results is None:
+                logging.warning(f"Audio editor for cut {i+1} returned None. Skipping.")
                 continue
             
-            chunk_start_s = edit_results["metadata"]["chunk_start_s_abs"]
-            chunk_end_s = edit_results["metadata"]["chunk_end_s_abs"]
-            
-            chunk_words = [
-                word for word in final_transcript['words'] 
-                if word['start'] >= chunk_start_s and word['end'] <= chunk_end_s
-            ]
-
-            # --- MODIFICATION START: Determine if the datapoint is usable ---
-            is_usable = True
-            for word in chunk_words:
-                # Find the corresponding word in MFA data to check its reliability
-                mfa_word = next((w for w in final_mfa_data if w['id'] == word['id']), None)
-                if mfa_word and not mfa_word.get('is_timestamp_reliable', True):
-                    is_usable = False
-                    logging.warning(f"Cut {i+1} marked as unusable due to unreliable timestamp in word: {word}")
-                    break
-            # --- MODIFICATION END ---
-            
+            # 3. Call the modified dataset_generator_svc with the new, simplified arguments.
+            # All other logic (like calculating is_usable) is GONE from the orchestrator.
             dataset_generator_svc.run(
                 source_audio_name=audio_path.stem,
                 cut_id=i + 1,
-                cut_word_ids=cut_word_ids,
-                chunk_words=chunk_words,
-                edit_results=edit_results,
-                is_usable=is_usable # Pass the flag to the generator
+                edit_results=edit_results
             )
         
         logging.info("Final Editing and Dataset Generation stage complete.")
+        # --- END OF MODIFIED SECTION ---
 
 # # src/pipeline_orchestrator.py
 # from pathlib import Path
@@ -307,8 +294,9 @@ class PipelineOrchestrator:
 #             chunk_paths = self.services['audio_splitter'].run(audio, splitter_df, chunks_dir, audio_path.stem)
 #             raw_scribe_results = []
 #             scribe_cache_dir = self.cache_root.parent / self.config['cache_paths']['scribe']
+#             scribe_cache_dir.mkdir(exist_ok=True, parents=True)
 #             for i, chunk_path in enumerate(chunk_paths):
-#                 scribe_chunk_cache_file = scribe_cache_dir / f"{chunk_path.stem}_scribe_chunk.json"
+#                 scribe_chunk_cache_file = scribe_cache_dir / f"{chunk_path.stem}.json"
 #                 if self.use_cache and scribe_chunk_cache_file.exists():
 #                     with open(scribe_chunk_cache_file, 'r') as f: result = json.load(f)
 #                 else:
@@ -360,7 +348,6 @@ class PipelineOrchestrator:
 #                 with open(llm_cache_path, 'w') as f: f.write(marked_transcript)
 #         logging.info("LLM Cut Selection stage complete.")
         
-#         # --- Stage 6: Cut Parsing, Editing, and Dataset Generation ---
 #         logging.info("Executing Final Editing and Dataset Generation stage...")
 
 #         y_full, sr = librosa.load(str(audio_path), sr=None, mono=True)
@@ -369,22 +356,18 @@ class PipelineOrchestrator:
 #         audio_editor_svc = self.services['audio_editor']
 #         dataset_generator_svc = self.services['dataset_generator']
 
-#         # cut_segments = cut_parser_svc.run(final_mfa_data, marked_transcript)
-#         # --- MODIFICATION START: Using Scribe data for parsing ---
 #         cut_segments = cut_parser_svc.run(final_transcript['words'], marked_transcript)
-#         # --- MODIFICATION END ---
 
 #         if not cut_segments:
 #             logging.info("No cut segments identified by the parser. Skipping editing.")
 #             return
 
 #         for i, cut_word_ids in enumerate(cut_segments):
-#             # --- MODIFICATION START: Skip cuts at the beginning or end of the audio ---
 #             last_word_id_in_transcript = len(final_mfa_data) - 1
 #             if not cut_word_ids or cut_word_ids[0] == 0 or cut_word_ids[-1] == last_word_id_in_transcript:
 #                 logging.warning(f"Skipping cut segment {cut_word_ids} because it involves a boundary word.")
 #                 continue
-#             # --- MODIFICATION END ---
+
 #             logging.info(f"Processing cut {i+1}/{len(cut_segments)} (word IDs: {cut_word_ids})...")
             
 #             edit_results = audio_editor_svc.run(
@@ -397,42 +380,35 @@ class PipelineOrchestrator:
 #                 split_points_df=split_points_df
 #             )
             
-#             # --- MODIFICATION START: Filter words for the current chunk ---
+#             if edit_results is None:
+#                 continue
+            
 #             chunk_start_s = edit_results["metadata"]["chunk_start_s_abs"]
 #             chunk_end_s = edit_results["metadata"]["chunk_end_s_abs"]
+            
+#             chunk_words = [
+#                 word for word in final_transcript['words'] 
+#                 if word['start'] >= chunk_start_s and word['end'] <= chunk_end_s
+#             ]
 
-#             # --- MODIFICATION START: Implement "majority overlap" rule ---
-#             chunk_words = []
-#             for word in final_transcript['words']:
-#                 word_start = word.get('start', 0)
-#                 word_end = word.get('end', 0)
-#                 word_duration = word_end - word_start
-#                 if word_duration <= 0:
-#                     continue
-
-#                 overlap_start = max(word_start, chunk_start_s)
-#                 overlap_end = min(word_end, chunk_end_s)
-                
-#                 # Ensure overlap is positive
-#                 overlap_duration = max(0, overlap_end - overlap_start)
-
-#                 if overlap_duration > (0.5 * word_duration):
-#                     chunk_words.append(word)
-#             # --- MODIFICATION END ---
-
-#             # chunk_words = [
-#             #     word for word in final_mfa_data 
-#             #     if word['start'] >= chunk_start_s and word['end'] <= chunk_end_s
-#             # ]
+#             # --- MODIFICATION START: Determine if the datapoint is usable ---
+#             is_usable = True
+#             for word in chunk_words:
+#                 # Find the corresponding word in MFA data to check its reliability
+#                 mfa_word = next((w for w in final_mfa_data if w['id'] == word['id']), None)
+#                 if mfa_word and not mfa_word.get('is_timestamp_reliable', True):
+#                     is_usable = False
+#                     logging.warning(f"Cut {i+1} marked as unusable due to unreliable timestamp in word: {word}")
+#                     break
 #             # --- MODIFICATION END ---
             
 #             dataset_generator_svc.run(
 #                 source_audio_name=audio_path.stem,
 #                 cut_id=i + 1,
 #                 cut_word_ids=cut_word_ids,
-#                 chunk_words=chunk_words, # Pass the filtered list of words
-#                 edit_results=edit_results
+#                 chunk_words=chunk_words,
+#                 edit_results=edit_results,
+#                 is_usable=is_usable # Pass the flag to the generator
 #             )
         
 #         logging.info("Final Editing and Dataset Generation stage complete.")
-        
