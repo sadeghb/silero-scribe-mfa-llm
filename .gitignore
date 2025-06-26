@@ -163,9 +163,14 @@ audio_inputs/
 # Ignore all generated dataset files.
 output_dataset/
 output_for_eval/
+output_cut_uncut/
 
 # Ignore all cached API and MFA results.
 cache/
 
 # Ignore temporary directories created by the MFA aligner.
 mfa_temp_corpus*/
+
+# Misc
+output_cut_uncut.zip
+output_for_eval.zip
